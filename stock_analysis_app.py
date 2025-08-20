@@ -1,3 +1,5 @@
+from typing import Optional
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -58,6 +60,10 @@ def get_openai_key():
         return st.secrets["openai"]["api_key"]
     except Exception:
         return None
+
+# Preflight: make sure Finnhub key is actually set
+if FINNHUB_API_KEY in (None, "", "YOUR_FINNHUB_API_KEY"):
+    st.warning("⚠️ Finnhub API key not set (see .streamlit/secrets.toml). Company news and some fields will be empty.")
 
 # =========================================
 # Helper: timeframe mapping
@@ -174,11 +180,14 @@ def fetch_yahoo_data(ticker: str, tf: str):
     except Exception:
         recs_df = pd.DataFrame()
 
-    # News (robust)
+    # News (robust + visibility)
     try:
         raw_news = t.news or []
+        if len(raw_news) == 0:
+            st.info("Yahoo returned 0 news items for this ticker (this is common on hosted environments).")
         news_df = parse_yahoo_news(raw_news)
-    except Exception:
+    except Exception as e:
+        st.warning(f"Yahoo news parsing failed: {e}")
         news_df = pd.DataFrame()
 
     return {
@@ -255,17 +264,36 @@ def fetch_finnhub_data(ticker: str, tf: str):
     except Exception:
         finnhub_recs_df = pd.DataFrame()
 
-    # Company news (30 days)
-    try:
+    # Company news with error surfacing + 30→90 day fallback
+    def _fetch_company_news(symbol: str, days_back: int) -> pd.DataFrame:
         to_date = datetime.utcnow().date()
-        from_date = to_date - timedelta(days=30)
-        news = requests.get(
+        from_date = to_date - timedelta(days=days_back)
+        resp = requests.get(
             f"{FINNHUB_URL}/company-news",
-            params={"symbol": ticker, "from": str(from_date), "to": str(to_date), "token": FINNHUB_API_KEY},
+            params={"symbol": symbol, "from": str(from_date), "to": str(to_date), "token": FINNHUB_API_KEY},
             timeout=15
-        ).json() or []
+        )
+        status = resp.status_code
+        text = resp.text
+        try:
+            data = resp.json()
+        except Exception:
+            data = None
+
+        if status != 200:
+            st.error(f"Finnhub news HTTP {status}. Response head: {text[:200]}")
+            return pd.DataFrame()
+
+        if isinstance(data, dict) and data.get("error"):
+            st.error(f"Finnhub news error: {data.get('error')}")
+            return pd.DataFrame()
+
+        if not isinstance(data, list):
+            st.warning("Finnhub news returned unexpected payload.")
+            return pd.DataFrame()
+
         rows = []
-        for n in news[:30]:
+        for n in data[:60]:
             dt = n.get("datetime")
             rows.append({
                 "provider": n.get("source", ""),
@@ -273,9 +301,11 @@ def fetch_finnhub_data(ticker: str, tf: str):
                 "link": n.get("url", ""),
                 "published": datetime.utcfromtimestamp(dt).strftime("%Y-%m-%d %H:%M:%S") if dt else ""
             })
-        finnhub_news_df = pd.DataFrame(rows)
-    except Exception:
-        finnhub_news_df = pd.DataFrame()
+        return pd.DataFrame(rows)
+
+    finnhub_news_df = _fetch_company_news(ticker, 30)
+    if finnhub_news_df.empty:
+        finnhub_news_df = _fetch_company_news(ticker, 90)
 
     # 52w high via metrics
     try:
@@ -437,7 +467,7 @@ def score_finnhub_recs(df: pd.DataFrame) -> float:
     raw = (2*sb + 1*b + 0*h - 1*s - 2*ss)
     return raw / max(total, 1)
 
-def score_momentum(change_pct: float | None, rsi: float | None, macd: float | None, macd_sig: float | None) -> float:
+def score_momentum(change_pct: Optional[float], rsi: Optional[float], macd: Optional[float], macd_sig: Optional[float]) -> float:
     """Combine price change, RSI, MACD into a momentum score (≈ −2..+2)."""
     score = 0.0
     if change_pct is not None:
@@ -471,7 +501,6 @@ def get_chatgpt_opinion(symbol: str, snapshot: dict) -> str:
 
     api_key = get_openai_key()
     if not api_key:
-        # Rules-based fallback text
         macd_rel = ">" if (macd is not None and macd_sig is not None and macd > macd_sig) else "<="
         return (f"My take (rules-based): **{consensus}**. "
                 f"Momentum Δ={change_pct:.2f}% | RSI={rsi:.1f} | MACD {macd_rel} Signal | "
@@ -627,10 +656,10 @@ with nc1:
                 if link:
                     st.write(f"[Open article]({link})")
     else:
-        st.info("No Yahoo news found (or response had missing fields).")
+        st.info("No Yahoo news available. This is often due to Yahoo blocking hosted traffic (HTTP 999) or empty feeds.")
 
 with nc2:
-    st.markdown("**Finnhub Company News (30d)**")
+    st.markdown("**Finnhub Company News (last 30–90 days)**")
     fn = f.get("news")
     if isinstance(fn, pd.DataFrame) and not fn.empty:
         for _, row in fn.head(10).iterrows():
@@ -642,7 +671,7 @@ with nc2:
                 if link:
                     st.write(f"[Open article]({link})")
     else:
-        st.info("No Finnhub news available (or missing API key).")
+        st.warning("No Finnhub news found. Verify your FINNHUB API key and account limits in `.streamlit/secrets.toml`.")
 
 # =========================
 # Consensus & My Opinion
