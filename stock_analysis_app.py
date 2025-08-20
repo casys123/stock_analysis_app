@@ -1,13 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, timedelta
 import yfinance as yf
 import requests
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib import rcParams
+import seaborn as sns
+import io
 import base64
-import json
 
 # Set page configuration
 st.set_page_config(
@@ -80,19 +82,18 @@ st.markdown("""
         font-weight: bold;
         text-align: center;
     }
-    .github-section {
-        background-color: #f5f5f5;
-        border-radius: 10px;
-        padding: 1.5rem;
-        margin-top: 2rem;
-        border-left: 5px solid #24292e;
+    .news-card {
+        background-color: #FFF3E0;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 0.5rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # App header
 st.markdown('<h1 class="main-header">📈 StockInsight Pro</h1>', unsafe_allow_html=True)
-st.markdown("### Your All-in-One Stock Analysis Dashboard with GitHub Integration")
+st.markdown("### Your All-in-One Stock Analysis Dashboard")
 
 # Sidebar for user input
 st.sidebar.header("Stock Selection")
@@ -108,18 +109,10 @@ time_frame = st.sidebar.selectbox(
     ["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "5Y"]
 )
 
-# GitHub integration section
-st.sidebar.markdown("---")
-st.sidebar.header("GitHub Integration")
-github_repo = st.sidebar.text_input("GitHub Repository (username/repo):", "your-username/stock-analysis")
-github_token = st.sidebar.text_input("GitHub Token (optional):", type="password")
-save_to_github = st.sidebar.checkbox("Save analysis to GitHub")
-
 st.sidebar.markdown("---")
 st.sidebar.info("💡 This tool aggregates data from multiple sources to provide comprehensive stock analysis and investment recommendations.")
 
 # Function to fetch stock data from Yahoo Finance
-@st.cache_data(ttl=3600)  # Cache for 1 hour
 def fetch_yahoo_data(ticker, period="1y"):
     """Fetch stock data from Yahoo Finance"""
     try:
@@ -150,86 +143,48 @@ def fetch_yahoo_data(ticker, period="1y"):
         st.error(f"Error fetching data from Yahoo Finance: {e}")
         return None
 
-# Function to fetch data from GitHub
-@st.cache_data(ttl=86400)  # Cache for 24 hours
-def fetch_github_data(repo, ticker):
-    """Fetch fundamental data from GitHub repository"""
+# Function to fetch financial news
+def fetch_financial_news(ticker):
+    """Fetch financial news for a given stock ticker"""
     try:
-        # URL to raw fundamental data (this is a placeholder - you would need to set up your own data)
-        url = f"https://raw.githubusercontent.com/{repo}/main/data/{ticker}_fundamentals.json"
-        response = requests.get(url)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            # Return sample data for demonstration
-            return {
-                "pe_ratio": np.random.uniform(10, 30),
-                "eps": np.random.uniform(1, 5),
-                "profit_margin": np.random.uniform(0.1, 0.3),
-                "roe": np.random.uniform(0.1, 0.25),
-                "dividend_yield": np.random.uniform(0.01, 0.04),
-                "debt_to_equity": np.random.uniform(0.5, 1.5),
-                "source": "Sample Data (add your GitHub repo for real data)"
+        # In a real application, you would use a news API here
+        # For demonstration, we'll return some sample news
+        news_items = [
+            {
+                "title": f"{ticker} Announces Strong Quarterly Results",
+                "source": "Financial Times",
+                "date": "2023-06-15",
+                "summary": f"{ticker} reported better-than-expected earnings for the last quarter, with revenue growth of 15% year-over-year."
+            },
+            {
+                "title": f"Analysts Upgrade {ticker} to Buy Rating",
+                "source": "Bloomberg",
+                "date": "2023-06-10",
+                "summary": f"Several analysts have upgraded {ticker} from Hold to Buy, citing strong growth potential in emerging markets."
+            },
+            {
+                "title": f"{ticker} Launches New Product Line",
+                "source": "Reuters",
+                "date": "2023-06-05",
+                "summary": f"{ticker} has announced a new product line that is expected to generate $500M in revenue next year."
+            },
+            {
+                "title": f"{ticker} Faces Regulatory Challenges",
+                "source": "Wall Street Journal",
+                "date": "2023-05-28",
+                "summary": f"{ticker} is facing new regulatory challenges in European markets that could impact future growth."
+            },
+            {
+                "title": f"{ticker} Expands Partnership with Major Tech Company",
+                "source": "CNBC",
+                "date": "2023-05-20",
+                "summary": f"{ticker} has expanded its partnership with a major tech company, which could lead to new revenue streams."
             }
+        ]
+        return news_items
     except Exception as e:
-        st.error(f"Error fetching data from GitHub: {e}")
-        return None
-
-# Function to save analysis to GitHub
-def save_analysis_to_github(repo, token, ticker, analysis_data):
-    """Save analysis results to GitHub"""
-    try:
-        if not token:
-            st.warning("GitHub token is required to save analysis")
-            return False
-            
-        # Prepare the data
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        filename = f"{ticker}_analysis_{date_str}.json"
-        
-        # GitHub API URL
-        url = f"https://api.github.com/repos/{repo}/contents/{filename}"
-        
-        # Encode content
-        content = json.dumps(analysis_data, indent=2)
-        content_bytes = content.encode("ascii")
-        content_base64 = base64.b64encode(content_bytes).decode("ascii")
-        
-        # Prepare headers
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        # Check if file exists
-        response = requests.get(url, headers=headers)
-        sha = None
-        if response.status_code == 200:
-            sha = response.json().get("sha")
-        
-        # Prepare data for PUT request
-        data = {
-            "message": f"Add analysis for {ticker} on {date_str}",
-            "content": content_base64,
-        }
-        
-        if sha:
-            data["sha"] = sha
-            
-        # Make the request
-        response = requests.put(url, headers=headers, json=data)
-        
-        if response.status_code in [200, 201]:
-            st.success(f"Analysis successfully saved to GitHub: {filename}")
-            return True
-        else:
-            st.error(f"Failed to save to GitHub: {response.json().get('message', 'Unknown error')}")
-            return False
-            
-    except Exception as e:
-        st.error(f"Error saving to GitHub: {e}")
-        return False
+        st.error(f"Error fetching news: {e}")
+        return []
 
 # Function to calculate technical indicators
 def calculate_technical_indicators(hist_data):
@@ -259,7 +214,7 @@ def calculate_technical_indicators(hist_data):
         return hist_data
 
 # Function to generate investment recommendation
-def generate_recommendation(data, technical_data, github_data):
+def generate_recommendation(data, technical_data):
     """Generate investment recommendation based on multiple factors"""
     try:
         if not data or technical_data.empty:
@@ -276,7 +231,7 @@ def generate_recommendation(data, technical_data, github_data):
         # Get RSI value
         rsi = technical_data['RSI'].iloc[-1] if 'RSI' in technical_data else 50
         
-        # Simple recommendation logic
+        # Simple recommendation logic (in a real app, this would be more sophisticated)
         score = 0
         
         # Price momentum
@@ -291,24 +246,8 @@ def generate_recommendation(data, technical_data, github_data):
         elif rsi > 70:
             score -= 1  # Overbought - potential selling opportunity
             
-        # Fundamental analysis from GitHub data
-        if github_data:
-            pe_ratio = github_data.get('pe_ratio', 0)
-            if pe_ratio < 15:
-                score += 1  # Potentially undervalued
-            elif pe_ratio > 25:
-                score -= 1  # Potentially overvalued
-                
-            roe = github_data.get('roe', 0)
-            if roe > 0.15:
-                score += 1  # Good profitability
-                
-            debt_to_equity = github_data.get('debt_to_equity', 1)
-            if debt_to_equity < 1:
-                score += 1  # Healthy debt levels
-        
         # Generate final recommendation
-        if score >= 3:
+        if score >= 2:
             return "Strong Buy"
         elif score >= 1:
             return "Buy"
@@ -323,13 +262,86 @@ def generate_recommendation(data, technical_data, github_data):
         st.error(f"Error generating recommendation: {e}")
         return "Hold"
 
+# Function to create price chart
+def create_price_chart(hist_data, ticker):
+    """Create a price chart with moving averages"""
+    try:
+        # Set up the plot
+        rcParams['figure.figsize'] = 12, 8
+        fig, ax = plt.subplots()
+        
+        # Plot closing price and moving averages
+        ax.plot(hist_data.index, hist_data['Close'], label='Close', linewidth=2, color='#1E88E5')
+        ax.plot(hist_data.index, hist_data['MA20'], label='20-Day MA', linestyle='--', color='#FF9800')
+        ax.plot(hist_data.index, hist_data['MA50'], label='50-Day MA', linestyle='--', color='#D81B60')
+        
+        # Format the plot
+        ax.set_title(f'{ticker} Price Chart', fontsize=16, fontweight='bold')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Price ($)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Format x-axis for better date display
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        plt.xticks(rotation=45)
+        
+        # Adjust layout
+        plt.tight_layout()
+        
+        return fig
+    except Exception as e:
+        st.error(f"Error creating price chart: {e}")
+        return None
+
+# Function to create technical indicators chart
+def create_technical_indicators_chart(hist_data, ticker):
+    """Create a chart with technical indicators"""
+    try:
+        # Set up the plot
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        
+        # Plot RSI
+        ax1.plot(hist_data.index, hist_data['RSI'], label='RSI', linewidth=2, color='#26A69A')
+        ax1.axhline(y=70, color='r', linestyle='--', alpha=0.7, label='Overbought (70)')
+        ax1.axhline(y=30, color='g', linestyle='--', alpha=0.7, label='Oversold (30)')
+        ax1.set_title(f'{ticker} RSI (14 days)', fontsize=14)
+        ax1.set_ylabel('RSI')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylim(0, 100)
+        
+        # Plot MACD
+        ax2.plot(hist_data.index, hist_data['MACD'], label='MACD', linewidth=2, color='#7B1FA2')
+        ax2.plot(hist_data.index, hist_data['MACD_Signal'], label='Signal', linewidth=2, color='#FF9800')
+        ax2.bar(hist_data.index, hist_data['MACD_Histogram'], label='Histogram', alpha=0.3, color='#26A69A')
+        ax2.set_title(f'{ticker} MACD', fontsize=14)
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('MACD')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Format x-axis for better date display
+        for ax in [ax1, ax2]:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        return fig
+    except Exception as e:
+        st.error(f"Error creating technical indicators chart: {e}")
+        return None
+
 # Main app logic
 def main():
     # Display loading spinner while fetching data
     with st.spinner('Fetching data from multiple sources...'):
         # Fetch data from various sources
         yahoo_data = fetch_yahoo_data(ticker_symbol, time_frame)
-        github_data = fetch_github_data(github_repo, ticker_symbol)
+        news_data = fetch_financial_news(ticker_symbol)
         
         # Calculate technical indicators if we have historical data
         if yahoo_data and not yahoo_data['history'].empty:
@@ -338,7 +350,7 @@ def main():
             technical_data = pd.DataFrame()
             
         # Generate investment recommendation
-        recommendation = generate_recommendation(yahoo_data, technical_data, github_data)
+        recommendation = generate_recommendation(yahoo_data, technical_data)
     
     # Display main stock information
     if yahoo_data:
@@ -376,91 +388,66 @@ def main():
     st.markdown('<h2 class="sub-header">Price Chart & Technical Analysis</h2>', unsafe_allow_html=True)
     
     if not technical_data.empty:
-        # Create price chart with moving averages
-        fig = go.Figure()
-        
-        # Add closing price
-        fig.add_trace(go.Scatter(x=technical_data.index, y=technical_data['Close'],
-                                mode='lines', name='Close', line=dict(color='#1E88E5')))
-        
-        # Add moving averages
-        fig.add_trace(go.Scatter(x=technical_data.index, y=technical_data['MA20'],
-                                mode='lines', name='20-Day MA', line=dict(color='#FF9800')))
-        
-        fig.add_trace(go.Scatter(x=technical_data.index, y=technical_data['MA50'],
-                                mode='lines', name='50-Day MA', line=dict(color='#D81B60')))
-        
-        fig.update_layout(
-            title=f'{ticker_symbol} Price Chart',
-            xaxis_title='Date',
-            yaxis_title='Price ($)',
-            hovermode='x unified',
-            height=500
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Create technical indicators charts
         col1, col2 = st.columns(2)
         
         with col1:
-            # RSI chart
-            fig_rsi = go.Figure()
-            fig_rsi.add_trace(go.Scatter(x=technical_data.index, y=technical_data['RSI'],
-                                        mode='lines', name='RSI', line=dict(color='#26A69A')))
-            fig_rsi.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
-            fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
-            fig_rsi.update_layout(title='RSI (14 days)', height=300)
-            st.plotly_chart(fig_rsi, use_container_width=True)
-            
+            # Create and display price chart
+            price_chart = create_price_chart(technical_data, ticker_symbol)
+            if price_chart:
+                st.pyplot(price_chart)
+        
         with col2:
-            # MACD chart
-            fig_macd = go.Figure()
-            fig_macd.add_trace(go.Scatter(x=technical_data.index, y=technical_data['MACD'],
-                                         mode='lines', name='MACD', line=dict(color='#7B1FA2')))
-            fig_macd.add_trace(go.Scatter(x=technical_data.index, y=technical_data['MACD_Signal'],
-                                         mode='lines', name='Signal', line=dict(color='#FF9800')))
-            fig_macd.update_layout(title='MACD', height=300)
-            st.plotly_chart(fig_macd, use_container_width=True)
+            # Create and display technical indicators chart
+            tech_chart = create_technical_indicators_chart(technical_data, ticker_symbol)
+            if tech_chart:
+                st.pyplot(tech_chart)
     else:
         st.warning("No historical data available for technical analysis.")
     
-    # Display fundamental analysis from GitHub
+    # Display fundamental analysis
     st.markdown('<h2 class="sub-header">Fundamental Analysis</h2>', unsafe_allow_html=True)
     
-    if github_data:
+    if yahoo_data:
         col1, col2, col3 = st.columns(3)
         
         with col1:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.markdown(f"**P/E Ratio:** {github_data.get('pe_ratio', 'N/A')}")
+            st.markdown(f"**P/E Ratio:** {yahoo_data['info'].get('trailingPE', 'N/A')}")
             st.markdown('</div>', unsafe_allow_html=True)
             
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.markdown(f"**EPS:** {github_data.get('eps', 'N/A')}")
+            st.markdown(f"**EPS:** {yahoo_data['info'].get('trailingEps', 'N/A')}")
             st.markdown('</div>', unsafe_allow_html=True)
             
         with col2:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.markdown(f"**Profit Margin:** {github_data.get('profit_margin', 'N/A')}")
+            st.markdown(f"**Profit Margin:** {yahoo_data['info'].get('profitMargins', 'N/A')}")
             st.markdown('</div>', unsafe_allow_html=True)
             
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.markdown(f"**ROE:** {github_data.get('roe', 'N/A')}")
+            st.markdown(f"**ROE:** {yahoo_data['info'].get('returnOnEquity', 'N/A')}")
             st.markdown('</div>', unsafe_allow_html=True)
             
         with col3:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.markdown(f"**Dividend Yield:** {github_data.get('dividend_yield', 'N/A')}")
+            st.markdown(f"**Dividend Yield:** {yahoo_data['info'].get('dividendYield', 'N/A')}")
             st.markdown('</div>', unsafe_allow_html=True)
             
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.markdown(f"**Debt to Equity:** {github_data.get('debt_to_equity', 'N/A')}")
+            st.markdown(f"**52 Week High:** {yahoo_data['info'].get('fiftyTwoWeekHigh', 'N/A')}")
             st.markdown('</div>', unsafe_allow_html=True)
-            
-        st.caption(f"Source: {github_data.get('source', 'GitHub')}")
     else:
-        st.info("No fundamental data available. Set up a GitHub repository with fundamental data.")
+        st.info("No fundamental data available for this stock.")
+    
+    # Display recent news
+    st.markdown('<h2 class="sub-header">Recent News</h2>', unsafe_allow_html=True)
+    
+    if news_data:
+        for news_item in news_data:
+            with st.expander(f"{news_item['title']} - {news_item['source']} ({news_item['date']})"):
+                st.markdown(f"<div class='news-card'>{news_item['summary']}</div>", unsafe_allow_html=True)
+    else:
+        st.info("No recent news available for this stock.")
     
     # Display investment thesis
     st.markdown('<h2 class="sub-header">Investment Thesis</h2>', unsafe_allow_html=True)
@@ -489,19 +476,6 @@ def main():
         else:
             st.markdown(f"- The RSI of {rsi:.2f} is in neutral territory, suggesting balanced buying and selling pressure", unsafe_allow_html=True)
         
-        if github_data:
-            pe_ratio = github_data.get('pe_ratio', 0)
-            if pe_ratio < 15:
-                st.markdown(f"- The P/E ratio of {pe_ratio:.2f} suggests the stock may be <span class='positive'>undervalued</span> compared to industry averages", unsafe_allow_html=True)
-            elif pe_ratio > 25:
-                st.markdown(f"- The P/E ratio of {pe_ratio:.2f} suggests the stock may be <span class='negative'>overvalued</span> compared to industry averages", unsafe_allow_html=True)
-            else:
-                st.markdown(f"- The P/E ratio of {pe_ratio:.2f} is in line with industry averages", unsafe_allow_html=True)
-                
-            roe = github_data.get('roe', 0)
-            if roe > 0.15:
-                st.markdown(f"- The Return on Equity (ROE) of {roe:.2%} indicates <span class='positive'>strong profitability</span>", unsafe_allow_html=True)
-        
         st.markdown("### Potential Risks")
         st.markdown("- Market volatility could impact short-term performance")
         st.markdown("- Changes in industry regulations could affect future growth")
@@ -511,39 +485,6 @@ def main():
         st.markdown("- Strong fundamentals support long-term growth prospects")
         st.markdown("- Innovation in products/services could drive market share gains")
         st.markdown("- Expansion into new markets may provide additional revenue streams")
-    
-    # GitHub integration section
-    st.markdown("---")
-    st.markdown('<div class="github-section">', unsafe_allow_html=True)
-    st.markdown("### 💾 GitHub Integration")
-    
-    if save_to_github:
-        # Prepare analysis data for saving
-        analysis_data = {
-            "ticker": ticker_symbol,
-            "date": datetime.now().isoformat(),
-            "price": yahoo_data['current_price'] if yahoo_data else 0,
-            "recommendation": recommendation,
-            "technical_indicators": {
-                "rsi": technical_data['RSI'].iloc[-1] if not technical_data.empty and 'RSI' in technical_data else "N/A",
-                "macd": technical_data['MACD'].iloc[-1] if not technical_data.empty and 'MACD' in technical_data else "N/A"
-            },
-            "fundamentals": github_data if github_data else {}
-        }
-        
-        if st.button("Save Analysis to GitHub"):
-            success = save_analysis_to_github(github_repo, github_token, ticker_symbol, analysis_data)
-            if success:
-                st.success("Analysis saved successfully!")
-    
-    st.markdown("""
-    #### How to set up GitHub integration:
-    1. Create a GitHub repository for your stock analysis
-    2. Generate a personal access token with repo permissions
-    3. Add your repository name (username/repo) and token in the sidebar
-    4. Check "Save analysis to GitHub" and click the save button
-    """)
-    st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
