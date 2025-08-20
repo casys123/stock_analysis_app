@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -33,7 +34,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<h1 class="main-header">📈 StockInsight Pro</h1>', unsafe_allow_html=True)
-st.markdown("### Compare Yahoo Finance and Finnhub — quotes, charts, fundamentals, recommendations, and news")
+st.markdown("### Yahoo + Finnhub data • RSI/MACD • Consensus & ChatGPT opinion (optional)")
 
 # =========================================
 # Sidebar
@@ -43,13 +44,20 @@ symbol = st.sidebar.text_input("Enter Stock Ticker:", "AAPL").strip().upper()
 time_frame = st.sidebar.selectbox("Select Time Frame:", ["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "5Y"])
 
 # =========================================
-# Finnhub config (with secrets fallback)
+# API Keys (secrets with safe fallbacks)
 # =========================================
 FINNHUB_URL = "https://finnhub.io/api/v1"
 try:
     FINNHUB_API_KEY = st.secrets["finnhub"]["api_key"]
 except Exception:
-    FINNHUB_API_KEY = "YOUR_FINNHUB_API_KEY"  # quick local test fallback (replace for testing)
+    FINNHUB_API_KEY = "YOUR_FINNHUB_API_KEY"  # replace for quick local testing
+
+# Optional OpenAI for ChatGPT opinion
+def get_openai_key():
+    try:
+        return st.secrets["openai"]["api_key"]
+    except Exception:
+        return None
 
 # =========================================
 # Helpers
@@ -78,7 +86,7 @@ def map_timeframe(tf: str):
 
 def yahoo_period_for(tf: str) -> str:
     """Map UI timeframe to yfinance history period."""
-    if tf == "1D": return "5d"   # get enough bars for display
+    if tf == "1D": return "5d"   # fetch enough bars to visualize
     if tf == "1W": return "1mo"
     if tf == "1M": return "3mo"
     if tf == "3M": return "6mo"
@@ -112,35 +120,31 @@ def fetch_yahoo_data(ticker: str, tf: str):
     except Exception:
         info = {}
 
-    # Recommendations (DataFrame or None) → sanitize to DataFrame
+    # Recommendations
     try:
         recs_df = t.recommendations
         if recs_df is not None and not recs_df.empty:
-            # keep recent subset with minimal columns if present
-            use_cols = [c for c in recs_df.columns if c.lower() in {"to grade", "from grade", "firm", "action"}]
-            recs_df = recs_df[use_cols] if use_cols else recs_df.copy()
-            recs_df = recs_df.tail(20)  # last 20 entries
+            recs_df = recs_df.tail(30).copy()
         else:
             recs_df = pd.DataFrame()
     except Exception:
         recs_df = pd.DataFrame()
 
-    # News (list of dicts)
+    # News
     try:
         news_list = t.news or []
-        # normalize to a small table
-        news_rows = []
+        rows = []
         for n in news_list[:20]:
-            news_rows.append({
+            rows.append({
                 "provider": n.get("publisher", n.get("provider", "")),
                 "title": n.get("title", ""),
                 "link": n.get("link", n.get("url", "")),
                 "published": datetime.fromtimestamp(n["providerPublishTime"]).strftime("%Y-%m-%d %H:%M:%S")
                     if n.get("providerPublishTime") else ""
             })
-        yahoo_news_df = pd.DataFrame(news_rows)
+        news_df = pd.DataFrame(rows)
     except Exception:
-        yahoo_news_df = pd.DataFrame()
+        news_df = pd.DataFrame()
 
     return {
         "history": hist,
@@ -153,13 +157,13 @@ def fetch_yahoo_data(ticker: str, tf: str):
         "week52_high": info.get("fiftyTwoWeekHigh"),
         "sector": info.get("sector"),
         "industry": info.get("industry"),
-        "recommendations": recs_df,    # DataFrame
-        "news": yahoo_news_df          # DataFrame
+        "recommendations": recs_df,   # DataFrame
+        "news": news_df               # DataFrame
     }
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_finnhub_data(ticker: str, tf: str):
-    """Fetch candles + profile + quote + recommendations + news from Finnhub."""
+    """Fetch candles + profile + quote + recommendations + news + metrics from Finnhub."""
     res, start, end = map_timeframe(tf)
 
     # Candles
@@ -193,7 +197,7 @@ def fetch_finnhub_data(ticker: str, tf: str):
     except Exception:
         profile = {}
 
-    # Quote (current price, previous close, etc.)
+    # Quote
     try:
         quote = requests.get(
             f"{FINNHUB_URL}/quote",
@@ -211,13 +215,12 @@ def fetch_finnhub_data(ticker: str, tf: str):
             timeout=15
         ).json() or []
         finnhub_recs_df = pd.DataFrame(recs)
-        # keep last 12 entries max
         if not finnhub_recs_df.empty:
-            finnhub_recs_df = finnhub_recs_df.head(12)
+            finnhub_recs_df = finnhub_recs_df.head(12).copy()
     except Exception:
         finnhub_recs_df = pd.DataFrame()
 
-    # Company news (last 30 days)
+    # Company news (30 days)
     try:
         to_date = datetime.utcnow().date()
         from_date = to_date - timedelta(days=30)
@@ -226,20 +229,31 @@ def fetch_finnhub_data(ticker: str, tf: str):
             params={"symbol": ticker, "from": str(from_date), "to": str(to_date), "token": FINNHUB_API_KEY},
             timeout=15
         ).json() or []
-        news_rows = []
+        rows = []
         for n in news[:30]:
             dt = n.get("datetime")
-            news_rows.append({
+            rows.append({
                 "provider": n.get("source", ""),
                 "title": n.get("headline", ""),
                 "link": n.get("url", ""),
                 "published": datetime.utcfromtimestamp(dt).strftime("%Y-%m-%d %H:%M:%S") if dt else ""
             })
-        finnhub_news_df = pd.DataFrame(news_rows)
+        finnhub_news_df = pd.DataFrame(rows)
     except Exception:
         finnhub_news_df = pd.DataFrame()
 
-    # Collect
+    # Price metrics (52w high/low, etc.)
+    try:
+        metrics = requests.get(
+            f"{FINNHUB_URL}/stock/metric",
+            params={"symbol": ticker, "metric": "price", "token": FINNHUB_API_KEY},
+            timeout=15
+        ).json() or {}
+        m = metrics.get("metric", {}) if isinstance(metrics, dict) else {}
+        week52_high = m.get("52WeekHigh")
+    except Exception:
+        week52_high = None
+
     return {
         "history": hist,
         "current_price": quote.get("c"),
@@ -248,15 +262,46 @@ def fetch_finnhub_data(ticker: str, tf: str):
         "pe": profile.get("peBasicExclExtraTTM"),
         "eps": profile.get("epsBasicExclExtraItemsTTM"),
         "dividend_yield": profile.get("dividendYieldIndicatedAnnual"),
-        "week52_high": profile.get("52WeekHigh") if "52WeekHigh" in profile else profile.get("52WeekHigh", None),
+        "week52_high": week52_high,
         "sector": profile.get("finnhubIndustry"),
-        "industry": profile.get("ipo"),  # Finnhub doesn't offer industry detail beyond 'finnhubIndustry'
+        "industry": profile.get("ipo"),  # Finnhub doesn't expose granular industry here
         "recommendations": finnhub_recs_df,  # DataFrame
         "news": finnhub_news_df              # DataFrame
     }
 
 # =========================================
-# Chart Helpers (Matplotlib only)
+# Technical Indicators
+# =========================================
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "Close" not in df:
+        return df
+    out = df.copy()
+
+    # Moving averages
+    out["MA20"] = out["Close"].rolling(20, min_periods=20).mean()
+    out["MA50"] = out["Close"].rolling(50, min_periods=50).mean()
+
+    # RSI (Wilder)
+    delta = out["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    roll_up = gain.ewm(alpha=1/14, adjust=False).mean()
+    roll_down = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = roll_up / roll_down.replace(0, np.nan)
+    out["RSI"] = 100 - (100 / (1 + rs))
+    out["RSI"] = out["RSI"].clip(0, 100)
+
+    # MACD
+    ema12 = out["Close"].ewm(span=12, adjust=False).mean()
+    ema26 = out["Close"].ewm(span=26, adjust=False).mean()
+    out["MACD"] = ema12 - ema26
+    out["MACD_Signal"] = out["MACD"].ewm(span=9, adjust=False).mean()
+    out["MACD_Hist"] = out["MACD"] - out["MACD_Signal"]
+
+    return out
+
+# =========================================
+# Charts (no seaborn, single plots)
 # =========================================
 def plot_close(df: pd.DataFrame, ticker: str, source_label: str):
     if df is None or df.empty or "Close" not in df:
@@ -264,9 +309,46 @@ def plot_close(df: pd.DataFrame, ticker: str, source_label: str):
     rcParams["figure.figsize"] = (11, 4)
     fig, ax = plt.subplots()
     ax.plot(df.index, df["Close"], label=f"{source_label} Close")
-    ax.set_title(f"{ticker} — {source_label} Closing Prices")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Price ($)")
+    if "MA20" in df.columns:
+        ax.plot(df.index, df["MA20"], linestyle="--", label="MA20")
+    if "MA50" in df.columns:
+        ax.plot(df.index, df["MA50"], linestyle="--", label="MA50")
+    ax.set_title(f"{ticker} — {source_label} Price")
+    ax.set_xlabel("Date"); ax.set_ylabel("Price ($)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(mdates.AutoDateLocator()))
+    fig.autofmt_xdate()
+    return fig
+
+def plot_rsi(df: pd.DataFrame, ticker: str, source_label: str):
+    if df is None or df.empty or "RSI" not in df:
+        return None
+    rcParams["figure.figsize"] = (11, 3.8)
+    fig, ax = plt.subplots()
+    ax.plot(df.index, df["RSI"], label="RSI")
+    ax.axhline(70, linestyle="--")
+    ax.axhline(30, linestyle="--")
+    ax.set_ylim(0, 100)
+    ax.set_title(f"{ticker} — RSI (14) [{source_label}]")
+    ax.set_xlabel("Date"); ax.set_ylabel("RSI")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(mdates.AutoDateLocator()))
+    fig.autofmt_xdate()
+    return fig
+
+def plot_macd(df: pd.DataFrame, ticker: str, source_label: str):
+    if df is None or df.empty or "MACD" not in df or "MACD_Signal" not in df:
+        return None
+    rcParams["figure.figsize"] = (11, 3.8)
+    fig, ax = plt.subplots()
+    ax.plot(df.index, df["MACD"], label="MACD")
+    ax.plot(df.index, df["MACD_Signal"], label="Signal")
+    if "MACD_Hist" in df:
+        ax.bar(df.index, df["MACD_Hist"], alpha=0.3, label="Histogram")
+    ax.set_title(f"{ticker} — MACD [{source_label}]")
+    ax.set_xlabel("Date"); ax.set_ylabel("Value")
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(mdates.AutoDateLocator()))
@@ -274,11 +356,144 @@ def plot_close(df: pd.DataFrame, ticker: str, source_label: str):
     return fig
 
 # =========================================
+# Consensus + ChatGPT opinion
+# =========================================
+def score_yahoo_recs(df: pd.DataFrame) -> float:
+    """Score Yahoo recommendations using To Grade/Action if present."""
+    if df is None or df.empty:
+        return 0.0
+    score = 0
+    n = 0
+
+    def map_grade(g: str):
+        if not isinstance(g, str):
+            return 0
+        g = g.lower()
+        buys = ["buy", "strong buy", "overweight", "outperform"]
+        sells = ["sell", "strong sell", "underperform"]
+        holds = ["hold", "market perform", "neutral"]
+        if any(k in g for k in buys): return 1
+        if any(k in g for k in sells): return -1
+        if any(k in g for k in holds): return 0
+        return 0
+
+    # Prefer To Grade/From Grade changes
+    for _, row in df.tail(15).iterrows():
+        if "To Grade" in df.columns:
+            score += map_grade(row.get("To Grade"))
+            n += 1
+        elif "to grade" in df.columns:
+            score += map_grade(row.get("to grade"))
+            n += 1
+        elif "Action" in df.columns:
+            act = str(row.get("Action", "")).lower()
+            if "up" in act or "initiate" in act or "reiterate buy" in act:
+                score += 1; n += 1
+            elif "down" in act or "reduce" in act:
+                score -= 1; n += 1
+    return score / n if n else 0.0
+
+def score_finnhub_recs(df: pd.DataFrame) -> float:
+    """Use the most recent row: weighted by strongBuy/buy/sell/strongSell."""
+    if df is None or df.empty:
+        return 0.0
+    row = df.iloc[0]  # latest period first
+    sb = int(row.get("strongBuy", 0) or 0)
+    b  = int(row.get("buy", 0) or 0)
+    h  = int(row.get("hold", 0) or 0)
+    s  = int(row.get("sell", 0) or 0)
+    ss = int(row.get("strongSell", 0) or 0)
+    total = sb + b + h + s + ss
+    if total == 0:
+        return 0.0
+    raw = (2*sb + 1*b + 0*h - 1*s - 2*ss)
+    return raw / max(total, 1)
+
+def score_momentum(change_pct: float, rsi: float, macd: float, macd_sig: float) -> float:
+    """Combine price change, RSI, MACD into -2..+2-ish."""
+    score = 0.0
+    # Price momentum
+    if change_pct is not None:
+        if change_pct > 2: score += 0.7
+        elif change_pct < -2: score -= 0.7
+    # RSI
+    if rsi is not None:
+        if rsi < 30: score += 0.6
+        elif rsi > 70: score -= 0.6
+    # MACD
+    if macd is not None and macd_sig is not None:
+        score += 0.5 if (macd - macd_sig) > 0 else -0.5
+    return score
+
+def label_from_score(x: float) -> str:
+    if x >= 1.5: return "Strong Buy"
+    if x >= 0.5: return "Buy"
+    if x > -0.5: return "Hold"
+    if x > -1.5: return "Sell"
+    return "Strong Sell"
+
+def get_chatgpt_opinion(symbol: str, snapshot: dict) -> str:
+    """
+    If OpenAI key available, ask GPT for a brief opinion. Otherwise, return a rules-based fallback.
+    """
+    # Build a compact snapshot
+    y_cp = snapshot.get("y_cp"); y_pc = snapshot.get("y_pc")
+    change_pct = ((y_cp - y_pc)/y_pc*100) if (y_cp and y_pc) else None
+    rsi = snapshot.get("rsi")
+    macd = snapshot.get("macd"); macd_sig = snapshot.get("macd_sig")
+    yahoo_s = snapshot.get("yahoo_rec_score", 0.0)
+    finn_s  = snapshot.get("finnhub_rec_score", 0.0)
+
+    # Fallback rules summary
+    consensus = snapshot.get("consensus_label", "Hold")
+
+    api_key = get_openai_key()
+    if not api_key:
+        return f"My take (rules-based): **{consensus}**. Momentum Δ={change_pct:.2f}% | RSI={rsi:.1f} | MACD {'>' if (macd and macd_sig and macd>macd_sig) else '<='} Signal | Yahoo recs={yahoo_s:.2f} | Finnhub recs={finn_s:.2f}"
+
+    try:
+        # Lazy import to avoid hard dependency
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+        prompt = f"""
+You are an equity analyst. Give a concise Buy/Sell/Hold view for {symbol} in 3 short bullet points.
+Inputs:
+- Price change vs prev close: {change_pct:.2f}% (if None, say N/A)
+- RSI(14): {rsi}
+- MACD vs Signal: {'bullish' if (macd and macd_sig and macd>macd_sig) else 'bearish' if (macd and macd_sig and macd<macd_sig) else 'N/A'}
+- Yahoo analyst score (−1..+1 approx): {yahoo_s:.2f}
+- Finnhub analyst score (−2..+2 normalized): {finn_s:.2f}
+- Preliminary consensus: {consensus}
+
+Output format:
+1) Overall rating: **Buy**, **Hold**, or **Sell**
+2) One-liner rationale using inputs
+3) 1 key risk to this view
+"""
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=180,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return f"My take (rules-based): **{consensus}**. Momentum Δ={change_pct:.2f}% | RSI={rsi:.1f} | MACD {'>' if (macd and macd_sig and macd>macd_sig) else '<='} Signal | Yahoo recs={yahoo_s:.2f} | Finnhub recs={finn_s:.2f}"
+
+# =========================================
 # Main App
 # =========================================
 with st.spinner("Fetching data from Yahoo & Finnhub…"):
     y = fetch_yahoo_data(symbol, time_frame)
     f = fetch_finnhub_data(symbol, time_frame)
+
+# Choose a base history for TA (prefer Yahoo daily; else Finnhub)
+base_hist = y.get("history")
+if base_hist is None or base_hist.empty:
+    base_hist = f.get("history")
+
+ta = add_indicators(base_hist)
 
 # KPIs
 c1, c2 = st.columns(2)
@@ -291,19 +506,19 @@ with c1:
         delta = cp - pc
         pct = (delta / pc) * 100 if pc else 0
         st.metric("Current Price", f"${cp:,.2f}", f"{delta:,.2f} ({pct:.2f}%)")
-    fig_y = plot_close(y.get("history"), symbol, "Yahoo")
+    fig_y = plot_close(add_indicators(y.get("history")), symbol, "Yahoo")
     if fig_y: st.pyplot(fig_y)
 
 with c2:
     st.subheader("📊 Finnhub")
     st.write(f"Sector: {f.get('sector') or 'N/A'}")
     st.write(f"Industry (IPO date shown as placeholder): {f.get('industry') or 'N/A'}")
-    cp, pc = f.get("current_price"), f.get("previous_close")
-    if cp is not None and pc:
-        delta = cp - pc
-        pct = (delta / pc) * 100 if pc else 0
-        st.metric("Current Price", f"${cp:,.2f}", f"{delta:,.2f} ({pct:.2f}%)")
-    fig_f = plot_close(f.get("history"), symbol, "Finnhub")
+    cp2, pc2 = f.get("current_price"), f.get("previous_close")
+    if cp2 is not None and pc2:
+        delta2 = cp2 - pc2
+        pct2 = (delta2 / pc2) * 100 if pc2 else 0
+        st.metric("Current Price", f"${cp2:,.2f}", f"{delta2:,.2f} ({pct2:.2f}%)")
+    fig_f = plot_close(add_indicators(f.get("history")), symbol, "Finnhub")
     if fig_f: st.pyplot(fig_f)
 
 # Comparison Table
@@ -328,6 +543,19 @@ compare_df = pd.DataFrame({
 })
 st.dataframe(compare_df)
 
+# Technicals
+st.markdown('<h2 class="sub-header">Technical Indicators</h2>', unsafe_allow_html=True)
+if ta is not None and not ta.empty:
+    tcol1, tcol2 = st.columns(2)
+    with tcol1:
+        rsi_fig = plot_rsi(ta, symbol, "Base")
+        if rsi_fig: st.pyplot(rsi_fig)
+    with tcol2:
+        macd_fig = plot_macd(ta, symbol, "Base")
+        if macd_fig: st.pyplot(macd_fig)
+else:
+    st.info("No historical data available for RSI/MACD.")
+
 # Analyst Recommendations
 st.markdown('<h2 class="sub-header">Analyst Recommendations</h2>', unsafe_allow_html=True)
 rc1, rc2 = st.columns(2)
@@ -340,16 +568,15 @@ with rc1:
         st.info("No recent recommendations from Yahoo.")
 
 with rc2:
-    st.markdown("**Finnhub (latest)**")
+    st.markdown("**Finnhub (latest trends)**")
     fr = f.get("recommendations")
     if isinstance(fr, pd.DataFrame) and not fr.empty:
-        # If Finnhub returns columns like: buy, hold, sell, strongBuy, strongSell, period
         show_cols = [c for c in ["period", "strongBuy", "buy", "hold", "sell", "strongSell"] if c in fr.columns]
         st.dataframe(fr[show_cols] if show_cols else fr)
     else:
         st.info("No recent recommendation trends from Finnhub.")
 
-# News Sections
+# News
 st.markdown('<h2 class="sub-header">Recent News</h2>', unsafe_allow_html=True)
 nc1, nc2 = st.columns(2)
 with nc1:
@@ -376,20 +603,49 @@ with nc2:
     else:
         st.info("No Finnhub news available (or missing API key).")
 
-# Simple Rules-Based Recommendation (from price change only, as a demo)
-st.markdown('<h2 class="sub-header">Quick Take</h2>', unsafe_allow_html=True)
+# =========================
+# Consensus & ChatGPT Opinion
+# =========================
+# Compute quick momentum inputs from Yahoo (fallback to Finnhub)
 y_cp, y_pc = y.get("current_price"), y.get("previous_close")
-if y_cp and y_pc:
-    change_pct = (y_cp - y_pc) / y_pc * 100
-    score = 0
-    if change_pct > 2: score += 1
-    elif change_pct < -2: score -= 1
-    label = "Hold"
-    if score >= 1: label = "Buy"
-    if score <= -1: label = "Sell"
-    box_class = "recommendation-hold"
-    if label == "Buy": box_class = "recommendation-buy"
-    if label == "Sell": box_class = "recommendation-sell"
-    st.markdown(f'<div class="{box_class}">Yahoo momentum signal: <b>{label}</b> (Δ {change_pct:.2f}%)</div>', unsafe_allow_html=True)
-else:
-    st.info("Not enough data to compute a quick momentum signal.")
+if not y_cp or not y_pc:
+    y_cp, y_pc = f.get("current_price"), f.get("previous_close")
+change_pct = ((y_cp - y_pc)/y_pc*100) if (y_cp and y_pc) else None
+rsi_last = float(ta["RSI"].dropna().iloc[-1]) if (ta is not None and "RSI" in ta and not ta["RSI"].dropna().empty) else None
+macd_last = float(ta["MACD"].dropna().iloc[-1]) if (ta is not None and "MACD" in ta and not ta["MACD"].dropna().empty) else None
+macd_sig_last = float(ta["MACD_Signal"].dropna().iloc[-1]) if (ta is not None and "MACD_Signal" in ta and not ta["MACD_Signal"].dropna().empty) else None
+
+yahoo_rec_score = score_yahoo_recs(y.get("recommendations"))
+finnhub_rec_score = score_finnhub_recs(f.get("recommendations"))
+momentum_score = score_momentum(change_pct, rsi_last, macd_last, macd_sig_last)
+
+# Normalize Yahoo score roughly to similar range as Finnhub (−1..+1)
+yahoo_norm = max(min(yahoo_rec_score, 1), -1)
+
+# Weighted consensus
+# Give analysts 60% weight (30% Yahoo + 30% Finnhub), momentum 40%
+consensus_score = 0.3*yahoo_norm + 0.3*(finnhub_rec_score/2) + 0.4*momentum_score
+consensus_label = label_from_score(consensus_score)
+
+box_class = "recommendation-hold"
+if consensus_label.startswith("Strong Buy") or consensus_label == "Strong Buy": box_class = "recommendation-buy"
+elif consensus_label == "Buy": box_class = "recommendation-buy"
+elif consensus_label == "Sell": box_class = "recommendation-sell"
+elif consensus_label.startswith("Strong Sell"): box_class = "recommendation-sell"
+
+st.markdown('<h2 class="sub-header">Consensus View</h2>', unsafe_allow_html=True)
+st.markdown(f'<div class="{box_class}">Consensus: <b>{consensus_label}</b> '
+            f'(Score {consensus_score:.2f}; Momentum {momentum_score:.2f}, Yahoo rec {yahoo_norm:.2f}, Finnhub rec {finnhub_rec_score/2:.2f})</div>',
+            unsafe_allow_html=True)
+
+# ChatGPT Opinion (optional)
+snapshot = {
+    "y_cp": y_cp, "y_pc": y_pc,
+    "rsi": rsi_last, "macd": macd_last, "macd_sig": macd_sig_last,
+    "yahoo_rec_score": yahoo_norm, "finnhub_rec_score": finnhub_rec_score/2,
+    "consensus_label": consensus_label
+}
+
+st.markdown('<h2 class="sub-header">ChatGPT Opinion</h2>', unsafe_allow_html=True)
+opinion = get_chatgpt_opinion(symbol, snapshot)
+st.write(opinion)
