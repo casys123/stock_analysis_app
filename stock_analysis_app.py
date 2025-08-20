@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Dict
+from typing import Optional, Dict
 
 import streamlit as st
 import pandas as pd
@@ -46,6 +46,15 @@ st.sidebar.header("Stock Selection")
 symbol = st.sidebar.text_input("Enter Stock Ticker:", "AAPL").strip().upper()
 time_frame = st.sidebar.selectbox("Select Time Frame:", ["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "5Y"])
 
+# --- Technical settings ---
+st.sidebar.subheader("Technical Settings")
+fib_window = st.sidebar.selectbox(
+    "Fibonacci Lookback",
+    ["3M", "6M", "1Y", "2Y", "Max"],
+    index=2,  # default 1Y
+    help="Choose the window used to detect swing high/low for Fibonacci retracement."
+)
+
 # =========================================
 # API Keys (secrets + in-app override)
 # =========================================
@@ -61,7 +70,7 @@ def get_openai_key():
     except Exception:
         return None
 
-# session-persisted key
+# session-persisted Finnhub key with in-app override
 if "finnhub_api_key" not in st.session_state:
     st.session_state.finnhub_api_key = FINNHUB_API_KEY_DEFAULT
 
@@ -168,9 +177,11 @@ def parse_yahoo_news(raw_news):
 # =========================================
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_yahoo_data(ticker: str, tf: str):
+    """Fetch history + key stats + recommendations + news from Yahoo."""
     period = yahoo_period_for(tf)
     t = yf.Ticker(ticker)
 
+    # History
     try:
         hist = t.history(period=period)
         if not hist.empty and "Close" in hist:
@@ -179,17 +190,20 @@ def fetch_yahoo_data(ticker: str, tf: str):
     except Exception:
         hist = pd.DataFrame()
 
+    # Info
     try:
         info = t.info or {}
     except Exception:
         info = {}
 
+    # Recommendations
     try:
         recs_df = t.recommendations
         recs_df = recs_df.tail(30).copy() if recs_df is not None and not recs_df.empty else pd.DataFrame()
     except Exception:
         recs_df = pd.DataFrame()
 
+    # News (robust + visibility)
     try:
         raw_news = t.news or []
         if len(raw_news) == 0:
@@ -216,6 +230,7 @@ def fetch_yahoo_data(ticker: str, tf: str):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_finnhub_data(ticker: str, tf: str, api_key: Optional[str]):
+    """Fetch candles + profile + quote + recommendations + news + metrics from Finnhub."""
     if not api_key:
         return {
             "history": pd.DataFrame(), "current_price": None, "previous_close": None,
@@ -358,35 +373,38 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # =========================================
-# Fibonacci Retracement
+# Fibonacci Retracement (fixed window control)
 # =========================================
-def _fib_lookback_rows(tf: str) -> int:
-    # Approximate trading-day lookbacks that feel natural per timeframe
-    return {
-        "1D": 30,     # ~1.5 months intraday proxy
-        "1W": 60,     # ~3 months
-        "1M": 120,    # ~6 months
-        "3M": 180,    # ~9 months
-        "6M": 252,    # ~1 year
-        "YTD": 252,   # from Jan 1, but rows fallback
+def _fib_rows_from_choice(choice: str, df_len: int) -> int:
+    """Map UI choice to approximate trading-day rows."""
+    mapping = {
+        "3M": 63,
+        "6M": 126,
         "1Y": 252,
-        "5Y": 252*3,  # use ~3y window to keep levels meaningful
-    }.get(tf, 180)
+        "2Y": 504,
+        "Max": df_len or 0,
+    }
+    rows = mapping.get(choice, 252)
+    return min(rows, df_len or 0)
 
-def compute_fib(df: pd.DataFrame, tf: str) -> Optional[Dict]:
-    if df is None or df.empty: return None
-    if not set(["High", "Low", "Close"]).issubset(df.columns): return None
-    n = min(_fib_lookback_rows(tf), len(df))
-    window = df.tail(n)
+def compute_fib(df: pd.DataFrame, rows: int) -> Optional[Dict]:
+    """Compute Fib using the last `rows` bars (fixed window)."""
+    if df is None or df.empty:
+        return None
+    if not set(["High", "Low", "Close"]).issubset(df.columns):
+        return None
+    rows = max(2, min(rows, len(df)))  # need at least 2 points
+    window = df.tail(rows)
+
     swing_high = float(window["High"].max())
     swing_low = float(window["Low"].min())
-    if swing_high <= swing_low: return None
-    # Decide orientation: simple heuristic
+    if swing_high <= swing_low:
+        return None
+
     last_close = float(window["Close"].iloc[-1])
-    mid = (swing_high + swing_low)/2
+    mid = (swing_high + swing_low) / 2.0
     uptrend = last_close >= mid
 
-    # Standard retracement levels (from high->low for downtrend, low->high for uptrend)
     diff = swing_high - swing_low
     if uptrend:
         levels = {
@@ -407,7 +425,6 @@ def compute_fib(df: pd.DataFrame, tf: str) -> Optional[Dict]:
         }
         basis = "high→low (resistance levels)"
 
-    # Nearest level
     nearest_name, nearest_val, nearest_dist = None, None, float("inf")
     for name, val in levels.items():
         d = abs(last_close - val)
@@ -425,6 +442,7 @@ def compute_fib(df: pd.DataFrame, tf: str) -> Optional[Dict]:
         "nearest_level_value": nearest_val,
         "nearest_level_distance_pct": nearest_pct,
         "basis": basis,
+        "rows": rows,
     }
 
 def plot_price_with_fib(df: pd.DataFrame, fib: Dict, ticker: str):
@@ -446,7 +464,7 @@ def plot_price_with_fib(df: pd.DataFrame, fib: Dict, ticker: str):
         return None
 
 # =========================================
-# Charts
+# Charts (single-plot, default colors)
 # =========================================
 def plot_close(df: pd.DataFrame, ticker: str, source_label: str):
     if df is None or df.empty or "Close" not in df:
@@ -454,11 +472,14 @@ def plot_close(df: pd.DataFrame, ticker: str, source_label: str):
     rcParams["figure.figsize"] = (11, 4)
     fig, ax = plt.subplots()
     ax.plot(df.index, df["Close"], label=f"{source_label} Close")
-    if "MA20" in df.columns: ax.plot(df.index, df["MA20"], linestyle="--", label="MA20")
-    if "MA50" in df.columns: ax.plot(df.index, df["MA50"], linestyle="--", label="MA50")
+    if "MA20" in df.columns:
+        ax.plot(df.index, df["MA20"], linestyle="--", label="MA20")
+    if "MA50" in df.columns:
+        ax.plot(df.index, df["MA50"], linestyle="--", label="MA50")
     ax.set_title(f"{ticker} — {source_label} Price")
     ax.set_xlabel("Date"); ax.set_ylabel("Price ($)")
-    ax.legend(); ax.grid(True, alpha=0.3)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_formatter(mdates.AutoDateFormatter(mdates.AutoDateLocator()))
     fig.autofmt_xdate()
     return fig
@@ -485,7 +506,8 @@ def plot_macd(df: pd.DataFrame, ticker: str, source_label: str):
     fig, ax = plt.subplots()
     ax.plot(df.index, df["MACD"], label="MACD")
     ax.plot(df.index, df["MACD_Signal"], label="Signal")
-    if "MACD_Hist" in df: ax.bar(df.index, df["MACD_Hist"], alpha=0.3, label="Histogram")
+    if "MACD_Hist" in df.columns:
+        ax.bar(df.index, df["MACD_Hist"], alpha=0.3, label="Histogram")
     ax.set_title(f"{ticker} — MACD [{source_label}]")
     ax.set_xlabel("Date"); ax.set_ylabel("Value")
     ax.legend(); ax.grid(True, alpha=0.3)
@@ -497,10 +519,14 @@ def plot_macd(df: pd.DataFrame, ticker: str, source_label: str):
 # Scoring / Consensus
 # =========================================
 def score_yahoo_recs(df: pd.DataFrame) -> float:
-    if df is None or df.empty: return 0.0
+    """Score Yahoo recommendations using To Grade/Action if present (≈ −1..+1)."""
+    if df is None or df.empty:
+        return 0.0
     score, n = 0.0, 0
+
     def map_grade(g: str):
-        if not isinstance(g, str): return 0
+        if not isinstance(g, str):
+            return 0
         g = g.lower()
         buys = ["buy","strong buy","overweight","outperform"]
         sells = ["sell","strong sell","underperform"]
@@ -509,27 +535,38 @@ def score_yahoo_recs(df: pd.DataFrame) -> float:
         if any(k in g for k in sells): return -1
         if any(k in g for k in holds): return 0
         return 0
+
     lower_cols = [c.lower() for c in df.columns]
     for _, row in df.tail(15).iterrows():
         if "to grade" in lower_cols:
-            score += map_grade(row[df.columns[lower_cols.index("to grade")]]); n += 1
+            score += map_grade(row[df.columns[lower_cols.index("to grade")]])
+            n += 1
         elif "action" in lower_cols:
             act = str(row[df.columns[lower_cols.index("action")]]).lower()
-            if "up" in act or "initiate" in act or "reiterate buy" in act: score += 1; n += 1
-            elif "down" in act or "reduce" in act: score -= 1; n += 1
+            if "up" in act or "initiate" in act or "reiterate buy" in act:
+                score += 1; n += 1
+            elif "down" in act or "reduce" in act:
+                score -= 1; n += 1
     return score / n if n else 0.0
 
 def score_finnhub_recs(df: pd.DataFrame) -> float:
-    if df is None or df.empty: return 0.0
+    """Use latest row: weighted by strongBuy/buy/hold/sell/strongSell (≈ −2..+2)."""
+    if df is None or df.empty:
+        return 0.0
     row = df.iloc[0]
-    sb = int(row.get("strongBuy", 0) or 0); b = int(row.get("buy", 0) or 0)
-    h  = int(row.get("hold", 0) or 0); s = int(row.get("sell", 0) or 0); ss = int(row.get("strongSell", 0) or 0)
+    sb = int(row.get("strongBuy", 0) or 0)
+    b  = int(row.get("buy", 0) or 0)
+    h  = int(row.get("hold", 0) or 0)
+    s  = int(row.get("sell", 0) or 0)
+    ss = int(row.get("strongSell", 0) or 0)
     total = sb + b + h + s + ss
-    if total == 0: return 0.0
+    if total == 0:
+        return 0.0
     raw = (2*sb + 1*b + 0*h - 1*s - 2*ss)
     return raw / max(total, 1)
 
 def score_momentum(change_pct: Optional[float], rsi: Optional[float], macd: Optional[float], macd_sig: Optional[float]) -> float:
+    """Combine price change, RSI, MACD into a momentum score (≈ −2..+2)."""
     score = 0.0
     if change_pct is not None:
         if change_pct > 2: score += 0.7
@@ -542,13 +579,13 @@ def score_momentum(change_pct: Optional[float], rsi: Optional[float], macd: Opti
     return score
 
 def score_fib(fib: Optional[Dict]) -> float:
-    """Lightweight Fib signal: +0.6 if price is above 61.8% (uptrend set) or below 38.2% (downtrend set),
-       -0.6 if below 61.8% (uptrend) or above 38.2% (downtrend). Neutral else."""
+    """Lightweight Fib signal:
+       +0.6 if price is above 61.8% (uptrend) or below 38.2% (downtrend),
+       -0.6 if below 61.8% (uptrend) or above 38.2% (downtrend)."""
     if not fib: return 0.0
     lv = fib["levels"]; price = fib["last_close"]; up = fib["uptrend"]
-    # normalize keys
-    l236, l382, l500, l618, l786 = lv.get("23.6%"), lv.get("38.2%"), lv.get("50.0%"), lv.get("61.8%"), lv.get("78.6%")
-    if any(v is None for v in [l236,l382,l500,l618,l786,price]): return 0.0
+    l382, l618 = lv.get("38.2%"), lv.get("61.8%")
+    if any(v is None for v in [l382, l618, price]): return 0.0
     if up:
         if price >= l618: return 0.6
         if price <= l382: return -0.6
@@ -565,7 +602,7 @@ def label_from_score(x: float) -> str:
     return "Strong Sell"
 
 # =========================================
-# ChatGPT Opinion (optional; falls back to rules) — now includes Fib context
+# ChatGPT Opinion (optional; falls back to rules) — includes Fib context
 # =========================================
 def get_chatgpt_opinion(symbol: str, snapshot: dict) -> str:
     y_cp = snapshot.get("y_cp"); y_pc = snapshot.get("y_pc")
@@ -712,15 +749,19 @@ else:
 
 # Fibonacci
 st.markdown('<h2 class="sub-header">Fibonacci Retracement</h2>', unsafe_allow_html=True)
-fib = compute_fib(base_hist, time_frame)
+fib_rows = _fib_rows_from_choice(fib_window, len(base_hist) if base_hist is not None else 0)
+fib = compute_fib(base_hist, fib_rows)
 if fib:
-    fib_fig = plot_price_with_fib(base_hist.tail(_fib_lookback_rows(time_frame)), fib, symbol)
+    fib_fig = plot_price_with_fib(base_hist.tail(fib_rows), fib, symbol)
     if fib_fig: st.pyplot(fib_fig)
     nearest_desc = (f"{fib['nearest_level_name']} @ {fib['nearest_level_value']:,.2f} "
                     f"({fib['nearest_level_distance_pct']:.2f}% away)" if fib.get("nearest_level_value") else "N/A")
-    st.caption(f"Basis: {fib['basis']}. Swing High: {fib['swing_high']:,.2f} • Swing Low: {fib['swing_low']:,.2f} • Nearest: {nearest_desc}")
+    st.caption(
+        f"Window: {fib_window} ({fib['rows']} bars). {fib['basis']}. "
+        f"Swing High: {fib['swing_high']:,.2f} • Swing Low: {fib['swing_low']:,.2f} • Nearest: {nearest_desc}"
+    )
 else:
-    st.info("Not enough data to compute Fibonacci levels for the selected range.")
+    st.info("Not enough data to compute Fibonacci levels for the selected window.")
 
 # Analyst Recommendations
 st.markdown('<h2 class="sub-header">Analyst Recommendations</h2>', unsafe_allow_html=True)
@@ -777,7 +818,7 @@ with nc2:
             st.warning("Finnhub news disabled. Enter a valid Finnhub API key in the sidebar.")
 
 # =========================
-# Consensus & My Opinion (now includes Fib in scoring & colored label)
+# Consensus & My Opinion (includes Fib in scoring & colored label)
 # =========================
 # Momentum inputs (prefer Yahoo)
 y_cp, y_pc = y.get("current_price"), y.get("previous_close")
@@ -793,16 +834,18 @@ finnhub_rec_score = score_finnhub_recs(f.get("recommendations"))
 momentum_score = score_momentum(change_pct, rsi_last, macd_last, macd_sig_last)
 fib_score = score_fib(fib)
 
-# Normalize & combine (now includes Fib)
+# Normalize & combine (includes Fib)
 yahoo_norm = max(min(yahoo_rec_score, 1), -1)            # −1..+1
-finnhub_norm = (finnhub_rec_score / 2)                   # −1..+1 approx
+finnhub_norm = (finnhub_rec_score / 2)                   # scale to −1..+1 approx
 consensus_score = 0.28*yahoo_norm + 0.28*finnhub_norm + 0.32*momentum_score + 0.12*fib_score
 consensus_label = label_from_score(consensus_score)
 
 # Render Consensus View (bigger font)
 box_class = "recommendation-hold"
-if consensus_label in ("Strong Buy", "Buy"): box_class = "recommendation-buy"
-elif consensus_label in ("Sell", "Strong Sell"): box_class = "recommendation-sell"
+if consensus_label in ("Strong Buy", "Buy"):
+    box_class = "recommendation-buy"
+elif consensus_label in ("Sell", "Strong Sell"):
+    box_class = "recommendation-sell"
 
 st.markdown('<h2 class="sub-header">Consensus View</h2>', unsafe_allow_html=True)
 st.markdown(
@@ -816,9 +859,14 @@ st.markdown(
 snapshot = {
     "y_cp": y_cp, "y_pc": y_pc,
     "rsi": rsi_last, "macd": macd_last, "macd_sig": macd_sig_last,
-    "yahoo_rec_score": yahoo_norm, "finnhub_rec_score": finnhub_norm,
+    "yahoo_rec_score": yahoo_norm, "finnhub_rec_score": finnuhb_norm if 'finnuhb_norm' in locals() else finnuhb_norm,  # guard typo
     "consensus_label": consensus_label, "fib": fib
 }
+# Fix variable if typo occurred
+if 'finnuhb_norm' in locals():
+    snapshot["finnhub_rec_score"] = finnuhb_norm
+
+# Opinion text
 st.markdown('<div class="opinion-header">🧠 My Opinion</div>', unsafe_allow_html=True)
 opinion_text = get_chatgpt_opinion(symbol, snapshot)
 
