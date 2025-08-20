@@ -824,6 +824,7 @@ with nc2:
 y_cp, y_pc = y.get("current_price"), y.get("previous_close")
 if not y_cp or not y_pc:
     y_cp, y_pc = f.get("current_price"), f.get("previous_close")
+
 change_pct = ((y_cp - y_pc)/y_pc*100) if (y_cp and y_pc) else None
 rsi_last = float(ta["RSI"].dropna().iloc[-1]) if (ta is not None and "RSI" in ta and not ta["RSI"].dropna().empty) else None
 macd_last = float(ta["MACD"].dropna().iloc[-1]) if (ta is not None and "MACD" in ta and not ta["MACD"].dropna().empty) else None
@@ -835,8 +836,8 @@ momentum_score = score_momentum(change_pct, rsi_last, macd_last, macd_sig_last)
 fib_score = score_fib(fib)
 
 # Normalize & combine (includes Fib)
-yahoo_norm = max(min(yahoo_rec_score, 1), -1)            # −1..+1
-finnhub_norm = (finnhub_rec_score / 2)                   # scale to −1..+1 approx
+yahoo_norm = max(min(yahoo_rec_score, 1), -1)          # −1..+1
+finnhub_norm = (finnhub_rec_score / 2)                 # scale to −1..+1 approx
 consensus_score = 0.28*yahoo_norm + 0.28*finnhub_norm + 0.32*momentum_score + 0.12*fib_score
 consensus_label = label_from_score(consensus_score)
 
@@ -859,14 +860,10 @@ st.markdown(
 snapshot = {
     "y_cp": y_cp, "y_pc": y_pc,
     "rsi": rsi_last, "macd": macd_last, "macd_sig": macd_sig_last,
-    "yahoo_rec_score": yahoo_norm, "finnhub_rec_score": finnuhb_norm if 'finnuhb_norm' in locals() else finnuhb_norm,  # guard typo
+    "yahoo_rec_score": yahoo_norm, "finnhub_rec_score": finnhub_norm,
     "consensus_label": consensus_label, "fib": fib
 }
-# Fix variable if typo occurred
-if 'finnuhb_norm' in locals():
-    snapshot["finnhub_rec_score"] = finnuhb_norm
 
-# Opinion text
 st.markdown('<div class="opinion-header">🧠 My Opinion</div>', unsafe_allow_html=True)
 opinion_text = get_chatgpt_opinion(symbol, snapshot)
 
