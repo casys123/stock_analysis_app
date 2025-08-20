@@ -1,6 +1,7 @@
 streamlit
 yfinance>=0.2.50
-pandas
 requests
 matplotlib
-openai>=1.30.0  # optional; needed only if you want ChatGPT opinion
+pandas
+numpy
+openai>=1.0.0  # optional; only if you want LLM-based opinion
